@@ -53,7 +53,7 @@ exec /sd/bin/sd-server \
   --cfg-scale 1 \
   --steps 8 \
   --sampling-method euler \
-  --flow-shift 3 \
+  --flow-shift 1 \
   --diffusion-fa \
   --listen-ip 0.0.0.0 \
   --listen-port 1234 \
