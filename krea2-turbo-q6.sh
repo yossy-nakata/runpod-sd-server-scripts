@@ -1,139 +1,176 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Krea-2 Turbo Q6_K + Qwen3-VL 4B Q4_K_M + Wan 2.1 VAE
-# LoRAs: Fedor Filter Bypass + Krea2 Realism V2
-# Intended for stable-diffusion.cpp sd-server on a 24GB NVIDIA GPU.
+# Krea2 Turbo Q6 - Salad / stable-diffusion.cpp
 #
-# This RunPod version intentionally follows the simple FLUX.2 startup script:
-#   1. create directories
-#   2. download files sequentially with resume support
-#   3. show downloaded files
-#   4. exec sd-server
+# Core:
+#   - Krea-2-Turbo Q6_K
+#   - Qwen3-VL 4B Q4_K_M
+#   - Qwen3-VL 4B mmproj Q8_0
+#   - Wan 2.1 VAE
 #
-# Optional environment variables:
-#   HF_TOKEN / HUGGING_FACE_HUB_TOKEN / HUGGINGFACE_TOKEN : Hugging Face token
-#   MODEL_DIR : model directory (default: /workspace/models)
-#   LORA_DIR  : LoRA directory  (default: $MODEL_DIR/loras)
-#   PORT      : server port     (default: 1234)
-#   HOST      : listen IP       (default: 0.0.0.0)
-#   SD_SERVER : sd-server path  (default: /sd/bin/sd-server)
+# LoRA candidates are downloaded but NOT enabled globally.
+# Select LoRAs per API request through sd-server's structured LoRA field.
+#
+# Hugging Face files used here are public, so normal aria2c is used.
+# /usr/local/bin/aria2c_hf remains available for gated/private HF files.
 
-MODEL_DIR="${MODEL_DIR:-/workspace/models}"
-LORA_DIR="${LORA_DIR:-$MODEL_DIR/loras}"
-PORT="${PORT:-1234}"
-HOST="${HOST:-0.0.0.0}"
 SD_SERVER="${SD_SERVER:-/sd/bin/sd-server}"
+MODEL_ROOT="${MODEL_ROOT:-/sd/models}"
 
-mkdir -p "$MODEL_DIR" "$LORA_DIR"
+DIFFUSION_DIR="${MODEL_ROOT}/diffusion_models"
+TEXT_ENCODER_DIR="${MODEL_ROOT}/text_encoders"
+VAE_DIR="${MODEL_ROOT}/vae"
+LORA_DIR="${MODEL_ROOT}/loras"
 
-command -v curl >/dev/null 2>&1 || {
-    echo "[fatal] curl is required" >&2
-    exit 1
-}
+mkdir -p \
+  "$DIFFUSION_DIR" \
+  "$TEXT_ENCODER_DIR" \
+  "$VAE_DIR" \
+  "$LORA_DIR"
 
-if [ ! -x "$SD_SERVER" ]; then
-    echo "[fatal] sd-server not found or not executable: $SD_SERVER" >&2
-    exit 1
-fi
-
-HF_TOKEN_VALUE="${HF_TOKEN:-${HUGGING_FACE_HUB_TOKEN:-${HUGGINGFACE_TOKEN:-}}}"
-CURL_AUTH_ARGS=()
-if [ -n "$HF_TOKEN_VALUE" ]; then
-    CURL_AUTH_ARGS=(-H "Authorization: Bearer $HF_TOKEN_VALUE")
-fi
+ARIA_CONNECTIONS="${ARIA_CONNECTIONS:-8}"
+ARIA_SPLIT="${ARIA_SPLIT:-8}"
+ARIA_PIECE_SIZE="${ARIA_PIECE_SIZE:-4M}"
 
 download() {
-    local url="$1"
-    local dir="$2"
-    local file="$3"
+  local url="$1"
+  local dir="$2"
+  local out="$3"
 
-    local dst="$dir/$file"
-    local tmp="$dst.part"
+  echo "[download] ${out}"
 
-    if [ -s "$dst" ]; then
-        echo "[skip] $file"
-        return
-    fi
-
-    echo
-    echo "[download] $file"
-
-    curl \
-        --fail \
-        --location \
-        --retry 5 \
-        --retry-delay 2 \
-        --continue-at - \
-        "${CURL_AUTH_ARGS[@]}" \
-        --output "$tmp" \
-        "$url"
-
-    mv "$tmp" "$dst"
-    echo "[done] $file"
+  aria2c \
+    --continue=true \
+    --auto-file-renaming=false \
+    --allow-overwrite=true \
+    --max-connection-per-server="$ARIA_CONNECTIONS" \
+    --split="$ARIA_SPLIT" \
+    --min-split-size="$ARIA_PIECE_SIZE" \
+    --file-allocation=none \
+    --connect-timeout=15 \
+    --timeout=30 \
+    --retry-wait=2 \
+    --max-tries=0 \
+    --summary-interval=10 \
+    --dir="$dir" \
+    --out="$out" \
+    "$url"
 }
 
-echo "=== disk ==="
-df -h /workspace || true
-echo
+# ---------------------------------------------------------------------------
+# Core model files
+# ---------------------------------------------------------------------------
 
-echo "=== gpu ==="
-nvidia-smi || true
-echo
+KREA2_FILE="Krea-2-Turbo-Q6_K.gguf"
+QWEN_FILE="Qwen3VL-4B-Instruct-Q4_K_M.gguf"
+MMPROJ_FILE="mmproj-Qwen3VL-4B-Instruct-Q8_0.gguf"
+VAE_FILE="wan_2.1_vae.safetensors"
 
-# Krea-2 Turbo diffusion model (GGUF Q6_K)
 download \
-"https://huggingface.co/realrebelai/KREA-2_GGUFs/resolve/main/TURBO/Krea-2-Turbo-Q6_K.gguf?download=true" \
-"$MODEL_DIR" \
-"Krea-2-Turbo-Q6_K.gguf"
+  "https://huggingface.co/realrebelai/KREA-2_GGUFs/resolve/main/TURBO/Krea-2-Turbo-Q6_K.gguf?download=true" \
+  "$DIFFUSION_DIR" \
+  "$KREA2_FILE"
 
-# Qwen3-VL 4B text encoder (GGUF Q4_K_M)
 download \
-"https://huggingface.co/Qwen/Qwen3-VL-4B-Instruct-GGUF/resolve/main/Qwen3VL-4B-Instruct-Q4_K_M.gguf?download=true" \
-"$MODEL_DIR" \
-"Qwen3VL-4B-Instruct-Q4_K_M.gguf"
+  "https://huggingface.co/Qwen/Qwen3-VL-4B-Instruct-GGUF/resolve/main/Qwen3VL-4B-Instruct-Q4_K_M.gguf?download=true" \
+  "$TEXT_ENCODER_DIR" \
+  "$QWEN_FILE"
 
-# Wan 2.1 VAE
 download \
-"https://huggingface.co/Comfy-Org/Wan_2.1_ComfyUI_repackaged/resolve/main/split_files/vae/wan_2.1_vae.safetensors?download=true" \
-"$MODEL_DIR" \
-"wan_2.1_vae.safetensors"
+  "https://huggingface.co/Qwen/Qwen3-VL-4B-Instruct-GGUF/resolve/main/mmproj-Qwen3VL-4B-Instruct-Q8_0.gguf?download=true" \
+  "$TEXT_ENCODER_DIR" \
+  "$MMPROJ_FILE"
 
-# Fedor Krea2 Filter Bypass LoRA
 download \
-"https://huggingface.co/diobrando0/krea2_loras_public/resolve/main/fedor_bypass.safetensors?download=true" \
-"$LORA_DIR" \
-"fedor_bypass.safetensors"
+  "https://huggingface.co/Comfy-Org/Wan_2.1_ComfyUI_repackaged/resolve/main/split_files/vae/wan_2.1_vae.safetensors?download=true" \
+  "$VAE_DIR" \
+  "$VAE_FILE"
 
-# Krea2 Realism V2 LoRA
+# ---------------------------------------------------------------------------
+# LoRA candidates
+#
+# These are only placed in --lora-model-dir.
+# Nothing is permanently applied here.
+# ---------------------------------------------------------------------------
+
 download \
-"https://huggingface.co/RudySen/Krea2-realism-V2/resolve/main/Krea2-realism-V2.safetensors?download=true" \
-"$LORA_DIR" \
-"Krea2-realism-V2.safetensors"
+  "https://huggingface.co/Quiho/Krea2_TextFusion_Refusal-Reduction_LoRA_v1.0_lora/resolve/main/Krea2_TextFusion_Refusal_Reduction.safetensors?download=true" \
+  "$LORA_DIR" \
+  "Krea2_TextFusion_Refusal_Reduction.safetensors"
 
-echo
-echo "=== models ==="
-ls -lh "$MODEL_DIR"
-echo
+download \
+  "https://huggingface.co/diobrando0/krea2_loras_public/resolve/main/Krea2_HMNSFW_AIO.safetensors?download=true" \
+  "$LORA_DIR" \
+  "Krea2_HMNSFW_AIO.safetensors"
 
-echo "=== loras ==="
-ls -lh "$LORA_DIR"
-echo
+download \
+  "https://huggingface.co/RudySen/Krea2-realism-V2/resolve/main/Krea2-realism-V2.safetensors?download=true" \
+  "$LORA_DIR" \
+  "Krea2-realism-V2.safetensors"
 
-echo "=== starting sd-server ==="
-echo "LoRAs are available in $LORA_DIR but are not force-applied."
+download \
+  "https://huggingface.co/diobrando0/krea2_loras_public/resolve/main/fedor_bypass.safetensors?download=true" \
+  "$LORA_DIR" \
+  "fedor_bypass.safetensors"
+
+# Ostris/Comfy Krea2 reference-conditioning LoRA.
+# Downloaded as a candidate; not globally enabled.
+download \
+  "https://huggingface.co/ostris/krea2_turbo_style_reference/resolve/main/krea2_style_reference.safetensors?download=true" \
+  "$LORA_DIR" \
+  "krea2_style_reference.safetensors"
+
+# ---------------------------------------------------------------------------
+# Sanity checks
+# ---------------------------------------------------------------------------
+
+for f in \
+  "$DIFFUSION_DIR/$KREA2_FILE" \
+  "$TEXT_ENCODER_DIR/$QWEN_FILE" \
+  "$TEXT_ENCODER_DIR/$MMPROJ_FILE" \
+  "$VAE_DIR/$VAE_FILE"
+do
+  if [[ ! -s "$f" ]]; then
+    echo "[error] missing or empty file: $f" >&2
+    exit 1
+  fi
+done
+
+if [[ ! -x "$SD_SERVER" ]]; then
+  echo "[error] sd-server not executable: $SD_SERVER" >&2
+  exit 1
+fi
+
+echo "[models] download complete"
+du -sh "$MODEL_ROOT" || true
+df -h "$MODEL_ROOT" || true
+
+# ---------------------------------------------------------------------------
+# Start sd-server
+#
+# - Native IPv6 bind for Salad Container Gateway.
+# - Q6 Krea2 + Q4 text encoder + Q8 vision projector.
+# - LoRAs remain selectable per request.
+# - krea2_ostris_edit prepares the reference-image path used by compatible
+#   Krea2 community reference/edit LoRAs.
+# ---------------------------------------------------------------------------
+
+echo "[server] starting sd-server on [::]:1234"
 
 exec "$SD_SERVER" \
-  --diffusion-model "$MODEL_DIR/Krea-2-Turbo-Q6_K.gguf" \
-  --vae "$MODEL_DIR/wan_2.1_vae.safetensors" \
-  --llm "$MODEL_DIR/Qwen3VL-4B-Instruct-Q4_K_M.gguf" \
+  --listen-ip "::" \
+  --listen-port 1234 \
+  --diffusion-model "$DIFFUSION_DIR/$KREA2_FILE" \
+  --llm "$TEXT_ENCODER_DIR/$QWEN_FILE" \
+  --llm_vision "$TEXT_ENCODER_DIR/$MMPROJ_FILE" \
+  --vae "$VAE_DIR/$VAE_FILE" \
   --lora-model-dir "$LORA_DIR" \
-  --backend diffusion=cuda0,te=cuda0,vae=cuda0 \
-  --auto-fit off \
-  --cfg-scale 1 \
+  --lora-apply-mode at_runtime \
+  --ref-image-args "preset=krea2_ostris_edit" \
+  --cfg-scale 1.0 \
   --steps 8 \
   --sampling-method euler \
   --diffusion-fa \
-  --listen-ip "$HOST" \
-  --listen-port "$PORT" \
-  -v
+  --offload-to-cpu \
+  --verbose
