@@ -73,28 +73,50 @@ download() {
     "$url"
 }
 
-download_hf() {
+download_public() {
   local url="$1"
   local dir="$2"
   local out="$3"
 
-  if [[ -n "${HF_TOKEN:-}" ]]; then
-    download "$url" "$dir" "$out" /usr/local/bin/aria2c_hf
-  else
-    download "$url" "$dir" "$out"
-  fi
+  download "$url" "$dir" "$out"
+}
+
+download_gated() {
+  local url="$1"
+  local dir="$2"
+  local out="$3"
+
+  : "${HF_TOKEN:?HF_TOKEN is required for gated Hugging Face files}"
+
+  download "$url" "$dir" "$out" /usr/local/bin/aria2c_hf
+}
+
+download_by_auth() {
+  local auth="$1"   # public | gated
+  local url="$2"
+  local dir="$3"
+  local out="$4"
+
+  case "$auth" in
+    public)
+      download_public "$url" "$dir" "$out"
+      ;;
+    gated)
+      download_gated "$url" "$dir" "$out"
+      ;;
+    *)
+      echo "[error] invalid download auth mode: $auth" >&2
+      return 2
+      ;;
+  esac
 }
 
 lora_download() {
   local filename="$1"
   local url="$2"
-  local mode="${3:-public}"   # public | gated
+  local auth="${3:-public}"   # public | gated
 
-  if [[ "$mode" == "gated" ]]; then
-    download_hf "$url" "$LORA_DIR" "$filename"
-  else
-    download "$url" "$LORA_DIR" "$filename"
-  fi
+  download_by_auth "$auth" "$url" "$LORA_DIR" "$filename"
 }
 
 lora_loads() {
@@ -138,6 +160,9 @@ lora_loads() {
 # KREA_GGUF_URL="https://huggingface.co/<repo>/resolve/main/flux1-krea-dev-Q8_0.gguf?download=true"
 KREA_GGUF_URL="${KREA_GGUF_URL:-}"
 KREA_GGUF_FILE="${KREA_GGUF_FILE:-flux1-krea-dev-Q8_0.gguf}"
+# Explicitly classify the selected GGUF source. Do not infer auth from whether
+# HF_TOKEN happens to exist.
+KREA_GGUF_AUTH="${KREA_GGUF_AUTH:-public}"
 
 AE_URL="${AE_URL:-https://huggingface.co/black-forest-labs/FLUX.1-dev/resolve/main/ae.safetensors?download=true}"
 AE_FILE="${AE_FILE:-ae.safetensors}"
@@ -153,10 +178,14 @@ if [[ -z "$KREA_GGUF_URL" ]]; then
   exit 1
 fi
 
-download_hf "$KREA_GGUF_URL" "$DIFFUSION_DIR" "$KREA_GGUF_FILE"
-download_hf "$AE_URL" "$VAE_DIR" "$AE_FILE"
-download "$CLIP_L_URL" "$TEXT_ENCODER_DIR" "$CLIP_L_FILE"
-download "$T5_URL" "$TEXT_ENCODER_DIR" "$T5_FILE"
+download_by_auth "$KREA_GGUF_AUTH" "$KREA_GGUF_URL" "$DIFFUSION_DIR" "$KREA_GGUF_FILE"
+
+# Official BFL FLUX.1-dev VAE is gated: require HF_TOKEN and aria2c_hf.
+download_gated "$AE_URL" "$VAE_DIR" "$AE_FILE"
+
+# Public files: always use plain aria2c, even when HF_TOKEN is present.
+download_public "$CLIP_L_URL" "$TEXT_ENCODER_DIR" "$CLIP_L_FILE"
+download_public "$T5_URL" "$TEXT_ENCODER_DIR" "$T5_FILE"
 
 # -----------------------------------------------------------------------------
 # LoRA downloads
@@ -196,19 +225,23 @@ lora_download \
 
 # 2) Sensitive-content repo candidates
 #
-# The repo identities are confirmed, but the web-side file listing is hidden behind
-# the sensitive-content gate, so the exact filename must be checked once in browser.
-# After you confirm the filename, uncomment and fill these.
+# Repo identities are confirmed, but exact filenames / actual download auth
+# requirements are not yet verified. Do NOT classify these as gated merely
+# because Hugging Face marks the repo as sensitive.
+# After verifying each file, use:
+#   lora_download "file.safetensors" "URL" public
+# or
+#   lora_download "file.safetensors" "URL" gated
 
 # lora_download \
 #   "NSFWMaster.safetensors" \
 #   "https://huggingface.co/Jonjew/NSFWMaster/resolve/main/NSFWMaster.safetensors?download=true" \
-#   gated
+#   public   # change to gated only if verified
 #
 # lora_download \
 #   "Dynamic_Pose_Uncensored.safetensors" \
 #   "https://huggingface.co/Keltezaa/Dynamic_Pose_Uncensored/resolve/main/Dynamic_Pose_Uncensored.safetensors?download=true" \
-#   gated
+#   public   # change to gated only if verified
 
 # -----------------------------------------------------------------------------
 # Fixed LoRA load list
