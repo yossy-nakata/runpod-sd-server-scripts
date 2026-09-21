@@ -1,41 +1,31 @@
 #!/usr/bin/env bash
 set -euo pipefail
-# FLUX.1-Krea-dev - Salad / stable-diffusion.cpp
-#
-# What this script is:
-#   - start.sh meant to be fetched by bootstrap.sh via GITURL
-#   - model + LoRA downloader
-#   - fixed-LoRA list writer for the Python proxy (/tmp/fixed-loras.tsv)
-#
-# What is verified here:
-#   - FLUX in stable-diffusion.cpp uses:
-#       diffusion gguf + ae.safetensors + clip_l.safetensors + t5xxl_fp16.safetensors
-#   - FLUX.1 Krea [dev] is intended as a drop-in replacement for FLUX.1 [dev]
-#   - the LoRA URLs below are verified for 7 files
-#
-# What is NOT fully resolved here:
-#   - the exact community GGUF URL for FLUX.1-Krea-dev itself
-#   - 2 sensitive-content LoRA file names (NSFWMaster / Dynamic_Pose_Uncensored)
-#
-# So:
-#   1) fill KREA_GGUF_URL
-#   2) optionally fill the 2 gated LoRA file names / URLs
-#   3) keep lora_loads empty at first, then decide after GUI testing
 
-SD_SERVER="${SD_SERVER:-/sd/bin/sd-server}"
-MODEL_ROOT="${MODEL_ROOT:-/sd/models}"
+# FLUX.1-Krea-dev / Salad / stable-diffusion.cpp
+#
+# Salad-side user inputs remain exactly:
+#   GITURL
+#   HF_TOKEN
+#
+# Everything else is fixed here so a new Container Group does not require
+# additional manual configuration.
 
-# IMPORTANT:
-# bootstrap.sh launches this script expecting sd-server on 127.0.0.1:1235 by default.
-SD_LISTEN_IP="${SD_LISTEN_IP:-127.0.0.1}"
-SD_LISTEN_PORT="${SD_LISTEN_PORT:-1235}"
-
-FIXED_LORAS_FILE="${FIXED_LORAS_FILE:-/tmp/fixed-loras.tsv}"
+SD_SERVER="/sd/bin/sd-server"
+MODEL_ROOT="/sd/models"
 
 DIFFUSION_DIR="${MODEL_ROOT}/diffusion_models"
 TEXT_ENCODER_DIR="${MODEL_ROOT}/text_encoders"
 VAE_DIR="${MODEL_ROOT}/vae"
 LORA_DIR="${MODEL_ROOT}/loras"
+
+FIXED_LORAS_FILE="/tmp/fixed-loras.tsv"
+
+SD_LISTEN_IP="127.0.0.1"
+SD_LISTEN_PORT="1235"
+
+ARIA_CONNECTIONS="8"
+ARIA_SPLIT="8"
+ARIA_PIECE_SIZE="4M"
 
 mkdir -p \
   "$DIFFUSION_DIR" \
@@ -43,19 +33,14 @@ mkdir -p \
   "$VAE_DIR" \
   "$LORA_DIR"
 
-ARIA_CONNECTIONS="${ARIA_CONNECTIONS:-8}"
-ARIA_SPLIT="${ARIA_SPLIT:-8}"
-ARIA_PIECE_SIZE="${ARIA_PIECE_SIZE:-4M}"
-
 download() {
   local url="$1"
   local dir="$2"
   local out="$3"
-  local downloader="${4:-aria2c}"
 
   echo "[download] ${out}"
 
-  "$downloader" \
+  aria2c \
     --continue=true \
     --auto-file-renaming=false \
     --allow-overwrite=true \
@@ -73,55 +58,40 @@ download() {
     "$url"
 }
 
-download_public() {
+download_hf() {
   local url="$1"
   local dir="$2"
   local out="$3"
 
-  download "$url" "$dir" "$out"
-}
-
-download_gated() {
-  local url="$1"
-  local dir="$2"
-  local out="$3"
-
-  : "${HF_TOKEN:?HF_TOKEN is required for gated Hugging Face files}"
-
-  download "$url" "$dir" "$out" /usr/local/bin/aria2c_hf
-}
-
-download_by_auth() {
-  local auth="$1"   # public | gated
-  local url="$2"
-  local dir="$3"
-  local out="$4"
-
-  case "$auth" in
-    public)
-      download_public "$url" "$dir" "$out"
-      ;;
-    gated)
-      download_gated "$url" "$dir" "$out"
-      ;;
-    *)
-      echo "[error] invalid download auth mode: $auth" >&2
-      return 2
-      ;;
-  esac
+  # aria2c_hf itself requires HF_TOKEN and adds the Authorization header.
+  /usr/local/bin/aria2c_hf \
+    --continue=true \
+    --auto-file-renaming=false \
+    --allow-overwrite=true \
+    --max-connection-per-server="$ARIA_CONNECTIONS" \
+    --split="$ARIA_SPLIT" \
+    --min-split-size="$ARIA_PIECE_SIZE" \
+    --file-allocation=none \
+    --connect-timeout=15 \
+    --timeout=30 \
+    --retry-wait=2 \
+    --max-tries=0 \
+    --summary-interval=10 \
+    --dir="$dir" \
+    --out="$out" \
+    "$url"
 }
 
 lora_download() {
   local filename="$1"
   local url="$2"
-  local auth="${3:-public}"   # public | gated
 
-  download_by_auth "$auth" "$url" "$LORA_DIR" "$filename"
+  download "$url" "$LORA_DIR" "$filename"
 }
 
 lora_loads() {
   if (( $# % 3 != 0 )); then
-    echo "[error] lora_loads expects groups of: path multiplier is_high_noise" >&2
+    echo "[error] lora_loads expects: path multiplier is_high_noise ..." >&2
     return 2
   fi
 
@@ -151,68 +121,77 @@ lora_loads() {
   done
 }
 
-# -----------------------------------------------------------------------------
-# Core model files
-# -----------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Core FLUX.1-Krea-dev files
+# ---------------------------------------------------------------------------
 
-# REQUIRED: fill this with your chosen community-converted FLUX.1-Krea-dev GGUF.
-# Example shape only:
-# KREA_GGUF_URL="https://huggingface.co/<repo>/resolve/main/flux1-krea-dev-Q8_0.gguf?download=true"
-KREA_GGUF_URL="${KREA_GGUF_URL:-}"
-KREA_GGUF_FILE="${KREA_GGUF_FILE:-flux1-krea-dev-Q8_0.gguf}"
-# Explicitly classify the selected GGUF source. Do not infer auth from whether
-# HF_TOKEN happens to exist.
-KREA_GGUF_AUTH="${KREA_GGUF_AUTH:-public}"
+KREA_FILE="flux1-krea-dev-Q6_K.gguf"
+AE_FILE="ae.safetensors"
+CLIP_L_FILE="clip_l.safetensors"
+T5_FILE="t5xxl_fp16.safetensors"
 
-AE_URL="${AE_URL:-https://huggingface.co/black-forest-labs/FLUX.1-dev/resolve/main/ae.safetensors?download=true}"
-AE_FILE="${AE_FILE:-ae.safetensors}"
+# Public community GGUF conversion of FLUX.1-Krea-dev.
+download \
+  "https://huggingface.co/QuantStack/FLUX.1-Krea-dev-GGUF/resolve/main/flux1-krea-dev-Q6_K.gguf?download=true" \
+  "$DIFFUSION_DIR" \
+  "$KREA_FILE"
 
-CLIP_L_URL="${CLIP_L_URL:-https://huggingface.co/comfyanonymous/flux_text_encoders/resolve/main/clip_l.safetensors?download=true}"
-CLIP_L_FILE="${CLIP_L_FILE:-clip_l.safetensors}"
+# Official FLUX.1-dev VAE is gated; this is the only core download here that
+# deliberately uses HF_TOKEN through aria2c_hf.
+download_hf \
+  "https://huggingface.co/black-forest-labs/FLUX.1-dev/resolve/main/ae.safetensors?download=true" \
+  "$VAE_DIR" \
+  "$AE_FILE"
 
-T5_URL="${T5_URL:-https://huggingface.co/comfyanonymous/flux_text_encoders/resolve/main/t5xxl_fp16.safetensors?download=true}"
-T5_FILE="${T5_FILE:-t5xxl_fp16.safetensors}"
+# Public text encoders.
+download \
+  "https://huggingface.co/comfyanonymous/flux_text_encoders/resolve/main/clip_l.safetensors?download=true" \
+  "$TEXT_ENCODER_DIR" \
+  "$CLIP_L_FILE"
 
-if [[ -z "$KREA_GGUF_URL" ]]; then
-  echo "[error] KREA_GGUF_URL is empty. Set the exact FLUX.1-Krea-dev GGUF URL first." >&2
-  exit 1
-fi
+download \
+  "https://huggingface.co/comfyanonymous/flux_text_encoders/resolve/main/t5xxl_fp16.safetensors?download=true" \
+  "$TEXT_ENCODER_DIR" \
+  "$T5_FILE"
 
-download_by_auth "$KREA_GGUF_AUTH" "$KREA_GGUF_URL" "$DIFFUSION_DIR" "$KREA_GGUF_FILE"
-
-# Official BFL FLUX.1-dev VAE is gated: require HF_TOKEN and aria2c_hf.
-download_gated "$AE_URL" "$VAE_DIR" "$AE_FILE"
-
-# Public files: always use plain aria2c, even when HF_TOKEN is present.
-download_public "$CLIP_L_URL" "$TEXT_ENCODER_DIR" "$CLIP_L_FILE"
-download_public "$T5_URL" "$TEXT_ENCODER_DIR" "$T5_FILE"
-
-# -----------------------------------------------------------------------------
-# LoRA downloads
+# ---------------------------------------------------------------------------
+# LoRA candidates
 #
-# Download availability and fixed loading are deliberately separate.
-# -----------------------------------------------------------------------------
+# All are downloaded so they are visible in the sd-server GUI.
+# The GUI uses /sdcpp/v1/* and the Python proxy does not alter those requests.
+# ---------------------------------------------------------------------------
 
-# 1) Verified realism / photo / anatomy / speed LoRAs
-
-lora_download \
-  "lora.safetensors" \
-  "https://huggingface.co/XLabs-AI/flux-RealismLora/resolve/main/lora.safetensors?download=true"
-
-lora_download \
-  "amateurphoto-v6-forcu.safetensors" \
-  "https://huggingface.co/ujouy/Amateur_Photography_FluxDev/resolve/main/amateurphoto-v6-forcu.safetensors?download=true"
-
+# NSFW / anatomy / pose
 lora_download \
   "aidmaNSFWunlock-FLUX-V0.2.safetensors" \
   "https://huggingface.co/shahtab/FLUXNSFWunlock/resolve/main/aidmaNSFWunlock-FLUX-V0.2.safetensors?download=true"
 
 lora_download \
+  "NSFW_master.safetensors" \
+  "https://huggingface.co/Jonjew/NSFWMaster/resolve/main/NSFW_master.safetensors?download=true"
+
+lora_download \
+  "Dynamic_Poses-nsfw09.safetensors" \
+  "https://huggingface.co/Keltezaa/Dynamic_Pose_Uncensored/resolve/main/Dynamic_Poses-nsfw09.safetensors?download=true"
+
+lora_download \
   "flux-female-anatomy.safetensors" \
   "https://huggingface.co/uriel353/flux-female-anatomy/resolve/main/flux-female-anatomy.safetensors?download=true"
 
+# Photography / realism
 lora_download \
-  "diffusion_pytorch_model.safetensors" \
+  "amateurphoto-v6-forcu.safetensors" \
+  "https://huggingface.co/ujouy/Amateur_Photography_FluxDev/resolve/main/amateurphoto-v6-forcu.safetensors?download=true"
+
+# Use the Comfy-converted XLabs file recommended by stable-diffusion.cpp docs
+# for FLUX LoRA compatibility.
+lora_download \
+  "realism_lora_comfy_converted.safetensors" \
+  "https://huggingface.co/XLabs-AI/flux-lora-collection/resolve/main/realism_lora_comfy_converted.safetensors?download=true"
+
+# Speed experiments: downloaded for GUI A/B testing, not fixed-loaded.
+lora_download \
+  "FLUX.1-Turbo-Alpha.safetensors" \
   "https://huggingface.co/alimama-creative/FLUX.1-Turbo-Alpha/resolve/main/diffusion_pytorch_model.safetensors?download=true"
 
 lora_download \
@@ -223,57 +202,31 @@ lora_download \
   "FLUX.1-dev_tdd_adv_lora_weights.safetensors" \
   "https://huggingface.co/RED-AIGC/TDD/resolve/main/FLUX.1-dev_tdd_adv_lora_weights.safetensors?download=true"
 
-# 2) Sensitive-content repo candidates
+# ---------------------------------------------------------------------------
+# Fixed LoRAs for OpenAI-compatible /v1/images/generations only.
 #
-# Repo identities are confirmed, but exact filenames / actual download auth
-# requirements are not yet verified. Do NOT classify these as gated merely
-# because Hugging Face marks the repo as sensitive.
-# After verifying each file, use:
-#   lora_download "file.safetensors" "URL" public
-# or
-#   lora_download "file.safetensors" "URL" gated
+# The proxy injects these into OpenAI-compatible requests.
+# sd-server GUI requests (/sdcpp/v1/*) remain untouched and can freely test
+# any downloaded LoRA.
+#
+# Speed LoRAs are intentionally excluded because they need their own step /
+# guidance settings and must not be stacked blindly.
+# ---------------------------------------------------------------------------
 
-# lora_download \
-#   "NSFWMaster.safetensors" \
-#   "https://huggingface.co/Jonjew/NSFWMaster/resolve/main/NSFWMaster.safetensors?download=true" \
-#   public   # change to gated only if verified
-#
-# lora_download \
-#   "Dynamic_Pose_Uncensored.safetensors" \
-#   "https://huggingface.co/Keltezaa/Dynamic_Pose_Uncensored/resolve/main/Dynamic_Pose_Uncensored.safetensors?download=true" \
-#   public   # change to gated only if verified
+lora_loads \
+  "aidmaNSFWunlock-FLUX-V0.2.safetensors" "0.55" "false" \
+  "NSFW_master.safetensors"               "0.40" "false" \
+  "Dynamic_Poses-nsfw09.safetensors"      "0.60" "false" \
+  "flux-female-anatomy.safetensors"       "0.60" "false" \
+  "amateurphoto-v6-forcu.safetensors"     "0.45" "false" \
+  "realism_lora_comfy_converted.safetensors" "0.25" "false"
 
-# -----------------------------------------------------------------------------
-# Fixed LoRA load list
-#
-# Each entry is:
-#   path  multiplier  is_high_noise
-#
-# Leave this empty initially. Test from GUI first.
-# -----------------------------------------------------------------------------
-
-# Default: no fixed LoRAs
-lora_loads
-
-# Example normal-quality stack (not enabled):
-#
-# lora_loads \
-#   "aidmaNSFWunlock-FLUX-V0.2.safetensors" "0.55" "false" \
-#   "flux-female-anatomy.safetensors"      "0.60" "false" \
-#   "amateurphoto-v6-forcu.safetensors"    "0.45" "false" \
-#   "lora.safetensors"                     "0.25" "false"
-#
-# Example speed stack with exactly one 8-step LoRA (not enabled):
-#
-# lora_loads \
-#   "diffusion_pytorch_model.safetensors"  "1.00" "false"
-
-# -----------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
 # Sanity checks
-# -----------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
 
 for f in \
-  "$DIFFUSION_DIR/$KREA_GGUF_FILE" \
+  "$DIFFUSION_DIR/$KREA_FILE" \
   "$VAE_DIR/$AE_FILE" \
   "$TEXT_ENCODER_DIR/$CLIP_L_FILE" \
   "$TEXT_ENCODER_DIR/$T5_FILE"
@@ -286,6 +239,7 @@ done
 
 while IFS=$'\t' read -r lora_path _multiplier _is_high_noise; do
   [[ -z "$lora_path" ]] && continue
+
   if [[ ! -s "$LORA_DIR/$lora_path" ]]; then
     echo "[error] fixed LoRA was not downloaded: $LORA_DIR/$lora_path" >&2
     exit 1
@@ -301,23 +255,23 @@ echo "[models] download complete"
 du -sh "$MODEL_ROOT" || true
 df -h "$MODEL_ROOT" || true
 
-echo "[lora] fixed load list:"
-if [[ -s "$FIXED_LORAS_FILE" ]]; then
-  cat "$FIXED_LORAS_FILE"
-else
-  echo "[lora]   (empty)"
-fi
+echo "[lora] fixed OpenAI load list:"
+cat "$FIXED_LORAS_FILE"
 
-# -----------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
 # Start sd-server
-# -----------------------------------------------------------------------------
+#
+# Text encoders stay on CPU. The Q6_K diffusion model remains on GPU; unlike
+# --offload-to-cpu this avoids requiring the 24 GB system RAM to hold all
+# diffusion + text-encoder weights at once.
+# ---------------------------------------------------------------------------
 
 echo "[server] starting sd-server on ${SD_LISTEN_IP}:${SD_LISTEN_PORT}"
 
 exec "$SD_SERVER" \
   --listen-ip "$SD_LISTEN_IP" \
   --listen-port "$SD_LISTEN_PORT" \
-  --diffusion-model "$DIFFUSION_DIR/$KREA_GGUF_FILE" \
+  --diffusion-model "$DIFFUSION_DIR/$KREA_FILE" \
   --vae "$VAE_DIR/$AE_FILE" \
   --clip_l "$TEXT_ENCODER_DIR/$CLIP_L_FILE" \
   --t5xxl "$TEXT_ENCODER_DIR/$T5_FILE" \
@@ -326,6 +280,6 @@ exec "$SD_SERVER" \
   --cfg-scale 1.0 \
   --steps 28 \
   --sampling-method euler \
+  --clip-on-cpu \
   --diffusion-fa \
-  --offload-to-cpu \
   --verbose
