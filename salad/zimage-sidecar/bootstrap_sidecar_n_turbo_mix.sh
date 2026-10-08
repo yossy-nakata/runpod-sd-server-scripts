@@ -17,7 +17,7 @@ ADAPTER_SHA256="20a541d3e016ab8de0da076321b48b6cd9b3ffd072d9df830a068220ab2265f6
 
 CODE_DIR="/workspace/code"
 IDENTITY="/workspace/identity/character-v3.safetensors"
-ADAPTER="/workspace/adapters/zimage_turbo_training_adapter/zimage_turbo_training_adapter_v2.safetensors"
+ADAPTER="/workspace/adapters/zimage_turbo_training_adapter_v2.safetensors"
 TRAIN_MIX="/workspace/hf/zimage_turbo_train_mix"
 
 mkdir -p \
@@ -25,7 +25,7 @@ mkdir -p \
   "$HF_HOME" \
   "$CODE_DIR" \
   /workspace/identity \
-  /workspace/adapters/zimage_turbo_training_adapter \
+  /workspace/adapters \
   /workspace/runs \
   /workspace/validation \
   /workspace/final \
@@ -212,7 +212,7 @@ echo
 echo '=== training adapter ==='
 if [[ ! -f "$ADAPTER" ]]; then
   rclone copyto \
-    r2:nana-storage/zimage-sidecar/adapters/zimage_turbo_training_adapter/zimage_turbo_training_adapter_v2.safetensors \
+    r2:nana-storage/zimage-sidecar/adapters/zimage_turbo_training_adapter_v2.safetensors \
     "$ADAPTER" \
     --progress
 fi
